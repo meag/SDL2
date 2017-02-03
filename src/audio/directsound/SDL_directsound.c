@@ -19,6 +19,7 @@
   3. This notice may not be removed or altered from any source distribution.
 */
 #include "../../SDL_internal.h"
+#include "SDL_hints.h"
 
 #if SDL_AUDIO_DRIVER_DSOUND
 
@@ -33,6 +34,10 @@
 
 #ifndef WAVE_FORMAT_IEEE_FLOAT
 #define WAVE_FORMAT_IEEE_FLOAT 0x0003
+#endif
+
+#ifndef DSBCAPS_TRUEPLAYPOSITION
+#define DSBCAPS_TRUEPLAYPOSITION 0x00080000
 #endif
 
 /* DirectX function pointers for audio */
@@ -178,31 +183,66 @@ DSOUND_DetectDevices(void)
     pDirectSoundEnumerateW(FindAllDevs, (void *) ((size_t) 0));
 }
 
+static SDL_bool
+DSOUND_GetCursorPosition(_THIS, DWORD* write_cursor)
+{
+    DWORD cursor = 0;
+    DWORD read = 0;
+    HRESULT result;
+    DWORD min_buffer_size = 0;
+
+    /* check for slow-write-cursor fix */
+    {
+        const char* hint_text = SDL_GetHint(SDL_HINT_DSOUND_MIN_HW_BUFFER);
+
+        min_buffer_size = hint_text ? SDL_max(SDL_atoi(hint_text), 0) : 0;
+    }
+
+    result = IDirectSoundBuffer_GetCurrentPosition(this->hidden->mixbuf, &read, &cursor);
+    if (result == DSERR_BUFFERLOST) {
+        IDirectSoundBuffer_Restore(this->hidden->mixbuf);
+        result = IDirectSoundBuffer_GetCurrentPosition(this->hidden->mixbuf, &read, &cursor);
+    }
+    if (result != DS_OK) {
+#ifdef DEBUG_SOUND
+        SetDSerror("DirectSound GetCurrentPosition", result);
+#endif
+        return SDL_FALSE;
+    }
+
+    /* On some drivers, the gap between read & write cursors will gradually decrease,
+       then suddenly increase by more than a block size, causing audio drop out.
+       Now a minimum can be set, essentially allowing the app to anticipate the next
+       write cursor position.
+     */
+    if (min_buffer_size) {
+        int hw_buffered = (cursor > read ? cursor - read : this->hidden->num_buffers * this->spec.size - read + cursor);
+        int hw_presumed = min(min_buffer_size, (this->hidden->num_buffers - 2) * this->spec.size);
+
+        if (hw_buffered < hw_presumed) {
+            cursor = (read + hw_presumed) % (this->hidden->num_buffers * this->spec.size);
+        }
+    }
+
+    *write_cursor = cursor;
+    return SDL_TRUE;
+}
 
 static void
 DSOUND_WaitDevice(_THIS)
 {
     DWORD status = 0;
     DWORD cursor = 0;
-    DWORD junk = 0;
     HRESULT result = DS_OK;
 
     /* Semi-busy wait, since we have no way of getting play notification
        on a primary mixing buffer located in hardware (DirectX 5.0)
      */
-    result = IDirectSoundBuffer_GetCurrentPosition(this->hidden->mixbuf,
-                                                   &junk, &cursor);
-    if (result != DS_OK) {
-        if (result == DSERR_BUFFERLOST) {
-            IDirectSoundBuffer_Restore(this->hidden->mixbuf);
-        }
-#ifdef DEBUG_SOUND
-        SetDSerror("DirectSound GetCurrentPosition", result);
-#endif
+    if (!DSOUND_GetCursorPosition(this, &cursor)) {
         return;
     }
 
-    while ((cursor / this->spec.size) == this->hidden->lastchunk) {
+    while (cursor / this->spec.size == this->hidden->lastchunk) {
         /* FIXME: find out how much time is left and sleep that long */
         SDL_Delay(1);
 
@@ -228,10 +268,7 @@ DSOUND_WaitDevice(_THIS)
         }
 
         /* Find out where we are playing */
-        result = IDirectSoundBuffer_GetCurrentPosition(this->hidden->mixbuf,
-                                                       &junk, &cursor);
-        if (result != DS_OK) {
-            SetDSerror("DirectSound GetCurrentPosition", result);
+        if (!DSOUND_GetCursorPosition(this, &cursor)) {
             return;
         }
     }
@@ -258,14 +295,7 @@ DSOUND_GetDeviceBuf(_THIS)
 
     /* Figure out which blocks to fill next */
     this->hidden->locked_buf = NULL;
-    result = IDirectSoundBuffer_GetCurrentPosition(this->hidden->mixbuf,
-                                                   &junk, &cursor);
-    if (result == DSERR_BUFFERLOST) {
-        IDirectSoundBuffer_Restore(this->hidden->mixbuf);
-        result = IDirectSoundBuffer_GetCurrentPosition(this->hidden->mixbuf,
-                                                       &junk, &cursor);
-    }
-    if (result != DS_OK) {
+    if (!DSOUND_GetCursorPosition(this, &cursor)) {
         SetDSerror("DirectSound GetCurrentPosition", result);
         return (NULL);
     }
@@ -400,6 +430,7 @@ CreateSecondary(_THIS, const DWORD bufsize, WAVEFORMATEX *wfmt)
     format.dwSize = sizeof(format);
     format.dwFlags = DSBCAPS_GETCURRENTPOSITION2;
     format.dwFlags |= DSBCAPS_GLOBALFOCUS;
+    format.dwFlags |= DSBCAPS_TRUEPLAYPOSITION;
     format.dwBufferBytes = bufsize;
     format.lpwfxFormat = wfmt;
     result = IDirectSound_CreateSoundBuffer(sndObj, &format, sndbuf, NULL);
@@ -478,7 +509,7 @@ DSOUND_OpenDevice(_THIS, void *handle, const char *devname, int iscapture)
     SDL_bool tried_format = SDL_FALSE;
     SDL_AudioFormat test_format = SDL_FirstAudioFormat(this->spec.format);
     LPGUID guid = (LPGUID) handle;
-	DWORD bufsize;
+    DWORD bufsize;
 	
     /* Initialize all variables that we clean on shutdown */
     this->hidden = (struct SDL_PrivateAudioData *)
