@@ -707,6 +707,14 @@ extern "C" {
  */
 #define SDL_HINT_RPI_VIDEO_LAYER           "SDL_RPI_VIDEO_LAYER"
 
+ /*
+ * \brief Tell SDL to keep the audio buffer full, rather than filling it as required
+ *
+ * Value is also used as number of audio chunks to use when creating the sound buffer.
+ * If not set, the default SDL behaviour is used (buffer = 8 chunks of desired size)
+ */
+#define SDL_HINT_WINDOWS_FILL_AUDIO_BUFFER "SDL_WINDOWS_FILL_AUDIO_BUFFER"
+
 /**
  *  \brief  An enumeration of hint priorities
  */

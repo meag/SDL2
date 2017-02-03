@@ -40,6 +40,8 @@ struct SDL_PrivateAudioData
     int num_buffers;
     DWORD lastchunk;
     Uint8 *locked_buf;
+
+    BOOL usereadcursor;
 };
 
 #endif /* _SDL_directsound_h */
